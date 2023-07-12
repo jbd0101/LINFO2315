@@ -1,0 +1,136 @@
+# Simple Scheduler
+
+During the [last session](../first_baremetal/README.md), we saw how to handle the ESP32s3 SoC at the bare metal-level and how to interact with external devices through GPIOs.
+Those devices were polled at regular interval.
+Such routines are called "tasks" in the RTOS jargon.
+
+The goals of this session are the following:
+- [ ] Learn basic task scheduling algorithm (round-robin)
+- [ ] Learn the interrupt system of the board
+- [ ] Discover the Rust programming language
+
+## Implement a basic round-robin scheduler
+
+In this exercise, you will implement your very first Real-Time OS task scheduler.
+
+It is the most basic one we can think of:
+- There are no priorities: each task has the same one and they are executed in a round-robin fashion, i.e., one by one and loop back to the first one when the last one terminates.
+- There are no time constraints: each task is free to run as long as it wants to.
+- There is no preemption: tasks are not interrupted by other tasks. That being said, they still can be paused by hardware interrupt.
+
+Our simple round-robin scheduler is based on a [circular linked-list](https://en.wikipedia.org/wiki/Linked_list#Circular_linked_list).
+
+Several files are provided in addition to the classical `main.c` for this exercise:
+- [`include/priv_sched.h`](include/priv_sched.h): The private interface of our simple scheduler. It contains some definitions that users of our scheduler should not be aware of.
+- [`include/sched.h`](include/sched.h): The public interface of our simple scheduler. This is the set of structures and functions that will be leveraged by our scheduler users.
+- [`sched.c`](sched.c): The actual implementation of the private and public interfaces.
+
+### Code
+
+You should first implement each function of the API in `sched.c` then you should leverage your scheduler to program three simple tasks.
+They should print their name then sleep for `1*task_id`[s] where `task_id` is the number of the task, e.g. task 3 will sleep for 3[s].
+
+## Using the simple task Scheduler
+
+Now that you successfully scheduled dummy tasks, interleave the functions you implemented during [the last practical session](../first_baremetal/README.md), i.e., you should execute `task1` then `toggle_led` then `task2` and so on.
+
+You have now 6 running tasks on your device.
+However, they do not consume the same amount of time to execute.
+For example, `task3` is by design very slow compared to the other ones.
+Typically, we don't want that long lasting tasks postpone quick or important tasks.
+In the worst case, a task could use the whole CPU resources available without letting to any of the remaining tasks a chance to run.
+This particular issue is called `starvation`.
+
+There are multiple solutions to solve this issue and one of them is called `time-slicing`.
+The idea is that each task has a dedicated time slot during which it can use as much resources as it wants.
+The only requirement is that it should finish its execution before the end of the time slot.
+If it is not the case, the scheduler will interrupt the running task and give the hand to the next one.
+
+That being said, only a single task can run at a given time, so how can our scheduler interrupt the current task and execute its process?
+
+## ESP3sS3 Interrupt system
+
+The CPU of our SoC listen to signals called `interrupts`.
+Many peripherals on the SoC can produce such signal, also known as `Interrupt ReQuest (IRQ)`.
+Upon reception of such an IRQ, the CPU:
+- stops its current execution flow,
+- saves some state to restore the current program execution later and
+- executes an `Interrupt Service Routine (ISR)`. 
+
+Once the ISR has been executed, the CPU restores the saved state and resume the execution of the previous program.
+
+This is exactly the kind of mechanism we are looking for to implement our tick-based scheduler.
+
+### Generating and handling a single IRQ
+
+To introduce time constraints in our scheduler, we will leverage the general purpose hardware timers embedded in the ESP32s3 SoC.
+
+> In the remaining of this session, we only consider the *Timer Group 0* (TG0).
+
+#### Generate an IRQ from a timer peripheral
+
+Read the following sections of the [reference manual][manual]:
+- 12.1
+- 12.2.3
+- 12.2.4
+- 12.2.6
+- 12.3.2
+
+and answer the related questions on INGInious:
+- [Timer configuration](https://inginious.info.ucl.ac.be/course/LINFO2315/timer-irq)
+- [Timer value configuration](https://inginious.info.ucl.ac.be/course/LINFO2315/tg0-value)
+- [Timer alarm configuration](https://inginious.info.ucl.ac.be/course/LINFO2315/tg0-alarm-int)
+
+#### Route the IRQ to the CPU
+
+Read the following sections of the [reference manual][manual] and answer the [related questions on INGInious](https://inginious.info.ucl.ac.be/course/LINFO2315/cpu-irq):
+- 9.1
+- 9.2
+- 9.3.2
+- 9.3.3
+- 9.3.3.1
+
+#### Attaching Interrupt Service Request (ISR) to the interrupt
+
+Now that the interrupt generated by the timer will arrive to the CPU, we want to map the interrupt signal to a routine (ISR) used to handle the interrupt.
+To that end, we will use a ROM function (called `_xtos_set_interrupt_handler` in MDK) of the ESP32s3 Soc:
+```console
+/**
+  * @brief  Attach a interrupt handler to a CPU interrupt number.
+  *         This function equals to _xtos_set_interrupt_handler_arg(i, func, arg).
+  *         In FreeRTOS, please call FreeRTOS apis, never call this api.
+  *
+  * @param  int i : CPU interrupt number.
+  *
+  * @param  ets_isr_t func : Interrupt handler.
+  *
+  * @param  void *arg : argument of the handler.
+  *
+  * @return None
+  */
+  void ets_isr_attach(int i, ets_isr_t func, void *arg);
+```
+
+> See https://github.com/espressif/esp-idf/blob/master/components/esp_rom/include/esp32s3/rom/ets_sys.h#L381-L394
+
+#### Enable interrupts within the CPU
+
+Until now, we prepared the interrupt on the external peripheral and we configured the interrupt matrix in such a way that the peripheral interrupt is correctly sent to the CPU.
+But we still have to configure the CPU to accepts this interrupt.
+To do that, the LX7 Xtensa CPU exposes a 32-bits wide register `intenable`.
+Each bit of this register is mapped to one of the 32 core interrupts.
+Setting a bit in this register enables the related interrupt CPU-side.
+You can set this register in C code with `asm volatile ("wsr %0, intenable; rsync" : : "r"(<bit index>) : );`
+
+> Do not confuse the registers we used until now with `intenable`.
+> `intenable` is a register _within_ the CPU while the others are memory-mapped registers, i.e., the registers are located on the SoC peripherals.
+
+#### Code
+
+Fill in the functions `setup` and `my_isr` in the [main.c](main.c) file.
+
+## Rust introduction (I)
+
+Do the [following exercises](https://lighthearted-llama-a670af.netlify.app/exercises/course-1/morning.html).
+
+[manual]: https://forge.uclouvain.be/linfo2315/student/datasheets/-/blob/main/esp32-s3.pdf

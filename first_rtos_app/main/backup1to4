@@ -1,0 +1,195 @@
+#include <stdio.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "driver/gpio.h"
+// include esp_printf
+#include "esp_log.h"
+
+//QueueHandle_t queue;
+#define BUTTON_PIN 4
+typedef struct {
+    QueueHandle_t in;
+    QueueHandle_t out;
+    SemaphoreHandle_t sem_in;
+    SemaphoreHandle_t sem_out;
+} mult_args_t;
+
+mult_args_t mult_args;
+SemaphoreHandle_t button_sem;
+
+
+/**
+ * This task generates a sequence of integer, starting from one, one each second.
+ * At startup, the task must print its name and CPU core id.
+ * This task is a producer-only.
+ *
+ * @param[in]	args: The queue containing the integer stream
+ *
+ */
+
+void generator(void *args) {
+    // TODO
+    mult_args_t * mult_gs = (mult_args_t*) args;
+
+    xSemaphoreTake(mult_gs->sem_in,portMAX_DELAY);
+    char *name = pcTaskGetName(NULL);
+    QueueHandle_t *queue = &mult_gs->in;
+    int core = xPortGetCoreID();
+    printf("%s <%u> - Task start.\n", name, core);
+    uint32_t i=0;
+    while (1) {
+        i++;
+        xQueueSend(*queue, &i, 1000);
+        printf("i %lu \n", i);
+        //wait 10 second
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+}
+
+/**
+ * This task consumes a sequence of integer.
+ * At startup, the task must print its name and CPU core id.
+ * This task is a consumer-only.
+ *
+ * @param[in]	args: The queue containing the integer stream
+ *
+ */
+void sink(void *args) {
+    // TODO
+    mult_args_t * mult_gs = (mult_args_t*) args;
+    char *name = pcTaskGetName(NULL);
+    QueueHandle_t *queue = &mult_gs->out;
+    int core = xPortGetCoreID();
+    printf("%s <%u> - Task start.\n", name, core);
+    xSemaphoreGive(mult_gs->sem_out);
+    while (1) {
+        uint32_t i;
+        xQueueReceive(*queue, &i, portMAX_DELAY);
+        printf("%s <%u> - Received %lu \n", name, core, i);
+    }
+}
+
+/**
+ * This task consumes a sequence of integer.
+ * It then outputs the double of each integer.
+ * At startup, the task must print its name and CPU core id.
+ *
+ * @param[in]	args: A structure containing the input queue and output queue.
+ *
+ */
+void mult(void *args) {
+    // TODO
+    mult_args_t *mult_gs = (mult_args_t*) args;
+    xSemaphoreTake(mult_gs->sem_out,portMAX_DELAY);
+    char *name = pcTaskGetName(NULL);
+    int core = xPortGetCoreID();
+    printf("%s <%u> - Task start.\n", name, core);
+    xSemaphoreGive(mult_gs->sem_in);
+
+    while (1) {
+        uint32_t i;
+        xQueueReceive(mult_gs->in, &i, portMAX_DELAY);
+        i = i*2;
+        xQueueSend(mult_gs->out, &i, 1000);
+    }
+    // TODO
+
+}
+
+/**
+ * Task controlled by the User button.
+ *
+ * In Part 3, it just print the message "Button pressed."
+ *
+ * In Part 8, it must also scheduler new `generator` tasks, up to 5.
+ *
+ * @param[in]	args: Unused
+ */
+void button_task(void *args) {
+    // TODO
+    if(xSemaphoreTake(button_sem, 0) == pdTRUE){
+        printf("Button pressed.\n");
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        xSemaphoreGive(button_sem);
+
+    }
+    vTaskDelete(NULL);
+
+}
+
+/**
+ * ISR to be attached to the button GPIO IRQ.
+ *
+ * This ISR must activate the `button_task` task.
+ */
+static void IRAM_ATTR button_isr(void *args) {
+    // TODO
+    xTaskCreatePinnedToCore(button_task, "button_task", 2048, NULL, 2, NULL,0);
+}
+
+/**
+ * This function set-up all features used for this exercise.
+ * @return	0 if no error, else 1
+ */
+static inline int setup(void) {
+    // TODO
+    // launch on scheduler generator and sink tasks
+    // create queue
+
+    mult_args.in = xQueueCreate(40, sizeof(uint32_t));
+    mult_args.out = xQueueCreate(40, sizeof(uint32_t));
+    mult_args.sem_in = xSemaphoreCreateBinary();
+    mult_args.sem_out= xSemaphoreCreateBinary();
+    button_sem = xSemaphoreCreateBinary();
+    xSemaphoreGive(button_sem);
+    gpio_config_t io_conf;
+
+    io_conf.intr_type = GPIO_INTR_POSEDGE;
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pin_bit_mask = (1ULL << BUTTON_PIN);
+    io_conf.pull_down_en = 0;
+    io_conf.pull_up_en = 1;
+    gpio_config(&io_conf);
+
+    // Attach the button ISR handler
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(BUTTON_PIN, button_isr, NULL);
+
+//hook isr handler for specific gpio pin
+
+
+    if (mult_args.in == NULL || mult_args.out == NULL) {
+        printf("Queue creation failed.\n");
+        return 1;
+    }
+
+
+    return 0;
+}
+
+/**
+ * Main function called by the ESP-IDF SDK.
+ */
+void app_main(void) {
+
+    printf("Hello from ESP-IDF.\n");
+    esp_log_level_set("*", ESP_LOG_DEBUG);
+
+
+    if (setup()) {
+        printf("Exit.\n");
+        return;
+    }
+
+    printf("Initial setup finished. Starting tasks.\n");
+    xTaskCreatePinnedToCore(generator, "generator", 2048, &mult_args, 1, NULL,0);
+    xTaskCreatePinnedToCore(sink, "sink", 2048, &mult_args, 1, NULL,0);
+
+    //second thread for mult task on second core
+    xTaskCreatePinnedToCore(mult, "mult", 2048, &mult_args, 1, NULL, 1);
+
+    // TODO
+}
